@@ -145,6 +145,11 @@ class TradingBot:
         if not self.paper_trader.can_trade:
             return
 
+        # Don't trade on stale data
+        if self.data_feed.is_data_stale:
+            logger.warning("Data is stale, skipping strategy evaluation")
+            return
+
         session = self.session_mgr.get_session_for_model()
         if session is None:
             return

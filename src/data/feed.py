@@ -1,183 +1,129 @@
 """
 Market data feed module.
 Fetches real NQ futures data from Yahoo Finance.
-Falls back to simulated realistic data if Yahoo Finance is unavailable.
 Provides 1m and 5m candle data with volume.
 """
 
 import logging
+import time as _time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-
-try:
-    import yfinance as yf
-    HAS_YFINANCE = True
-except ImportError:
-    HAS_YFINANCE = False
+import yfinance as yf
 
 from config.settings import SYMBOL, TIMEFRAME_CONTEXT, TIMEFRAME_ENTRY
 
 logger = logging.getLogger(__name__)
 
+MAX_RETRIES = 4
+RETRY_BACKOFF = [2, 4, 8, 16]
+
+
+class DataFetchError(Exception):
+    """Raised when data cannot be fetched from Yahoo Finance."""
+    pass
+
 
 class DataFeed:
     """Fetches and manages real-time market data for NQ futures."""
 
-    def __init__(self, symbol: str = SYMBOL, use_simulation: bool = False):
+    def __init__(self, symbol: str = SYMBOL):
         self.symbol = symbol
-        self._use_simulation = use_simulation
-        if HAS_YFINANCE and not use_simulation:
-            self.ticker = yf.Ticker(symbol)
-        else:
-            self.ticker = None
         self._data_1m: Optional[pd.DataFrame] = None
         self._data_5m: Optional[pd.DataFrame] = None
         self._last_fetch: Optional[datetime] = None
-        self._sim_base_price = 21000.0  # Base price for NQ simulation
+        self._consecutive_failures = 0
+
+    def _create_ticker(self) -> yf.Ticker:
+        """Create a fresh Ticker instance (avoids stale cached state)."""
+        return yf.Ticker(self.symbol)
 
     def fetch_data(self) -> bool:
-        """Fetch latest 1m and 5m data. Returns True if successful."""
-        if self._use_simulation or self.ticker is None:
-            return self._generate_simulated_data()
+        """
+        Fetch latest 1m and 5m data from Yahoo Finance.
+        Retries up to 4 times with exponential backoff on failure.
+        Returns True if successful, False otherwise.
+        Never falls back to simulated data.
+        """
+        last_error = None
 
-        try:
-            self._data_1m = self.ticker.history(period="5d", interval="1m")
-            self._data_5m = self.ticker.history(period="5d", interval="5m")
+        for attempt in range(MAX_RETRIES):
+            try:
+                ticker = self._create_ticker()
 
-            if self._data_1m.empty or self._data_5m.empty:
-                logger.warning("Empty data from Yahoo Finance, falling back to simulation")
-                return self._generate_simulated_data()
+                data_1m = ticker.history(period="5d", interval="1m")
+                data_5m = ticker.history(period="5d", interval="5m")
 
-            # Clean column names
-            for df in [self._data_1m, self._data_5m]:
-                df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+                if data_1m is None or data_5m is None:
+                    raise DataFetchError("Received None from Yahoo Finance")
 
-            # Ensure timezone-aware timestamps in US/Eastern
-            for df in [self._data_1m, self._data_5m]:
-                if df.index.tz is not None:
-                    df.index = df.index.tz_convert("US/Eastern")
-                else:
-                    df.index = df.index.tz_localize("US/Eastern")
+                if data_1m.empty or data_5m.empty:
+                    raise DataFetchError("Received empty data from Yahoo Finance")
 
-            self._last_fetch = datetime.now()
-            logger.info(
-                "Data fetched (LIVE): %d 1m bars, %d 5m bars",
-                len(self._data_1m),
-                len(self._data_5m),
+                # Clean column names
+                for df in [data_1m, data_5m]:
+                    df.columns = [c.lower().replace(" ", "_") for c in df.columns]
+
+                # Ensure timezone-aware timestamps in US/Eastern
+                for df in [data_1m, data_5m]:
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_convert("US/Eastern")
+                    else:
+                        df.index = df.index.tz_localize("US/Eastern")
+
+                # Success — update stored data
+                self._data_1m = data_1m
+                self._data_5m = data_5m
+                self._last_fetch = datetime.now()
+                self._consecutive_failures = 0
+
+                logger.info(
+                    "Data fetched (LIVE): %d 1m bars, %d 5m bars",
+                    len(self._data_1m),
+                    len(self._data_5m),
+                )
+                return True
+
+            except Exception as e:
+                last_error = e
+                if attempt < MAX_RETRIES - 1:
+                    wait = RETRY_BACKOFF[attempt]
+                    logger.warning(
+                        "Yahoo Finance attempt %d/%d failed (%s), retrying in %ds...",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e,
+                        wait,
+                    )
+                    _time.sleep(wait)
+
+        # All retries exhausted
+        self._consecutive_failures += 1
+        logger.error(
+            "Yahoo Finance failed after %d retries: %s (consecutive failures: %d)",
+            MAX_RETRIES,
+            last_error,
+            self._consecutive_failures,
+        )
+
+        # If we have previous data, keep using it (stale but real)
+        if self._data_1m is not None and not self._data_1m.empty:
+            logger.warning(
+                "Using previously fetched data (age: %s)",
+                datetime.now() - self._last_fetch if self._last_fetch else "unknown",
             )
             return True
 
-        except Exception as e:
-            logger.warning("Yahoo Finance failed (%s), falling back to simulation", e)
-            return self._generate_simulated_data()
+        return False
 
-    def _generate_simulated_data(self) -> bool:
-        """
-        Generate realistic simulated NQ futures data.
-        Includes trends, ranges, volume spikes, and session-like patterns.
-        """
-        logger.info("Generating simulated NQ data...")
-        now = pd.Timestamp.now(tz="US/Eastern")
-
-        # Generate 3 days of 1-minute data
-        trading_minutes = []
-        for day_offset in range(3, 0, -1):
-            day = now - pd.Timedelta(days=day_offset)
-            day_start = day.replace(hour=3, minute=0, second=0, microsecond=0)
-            # Generate from 03:00 (London) to 16:00 (NY close)
-            for minute in range(780):  # 13 hours * 60 minutes
-                trading_minutes.append(day_start + pd.Timedelta(minutes=minute))
-
-        # Also add today's bars up to current time
-        today_start = now.replace(hour=3, minute=0, second=0, microsecond=0)
-        minutes_today = int((now - today_start).total_seconds() / 60)
-        for minute in range(max(0, minutes_today)):
-            trading_minutes.append(today_start + pd.Timedelta(minutes=minute))
-
-        if not trading_minutes:
-            # If no trading minutes (e.g., before 3am), generate last trading day
-            yesterday = now - pd.Timedelta(days=1)
-            day_start = yesterday.replace(hour=3, minute=0, second=0, microsecond=0)
-            for minute in range(780):
-                trading_minutes.append(day_start + pd.Timedelta(minutes=minute))
-
-        n = len(trading_minutes)
-        np.random.seed(int(now.timestamp()) % 100000)
-
-        # Generate price walk with trend/range regimes
-        returns = np.random.randn(n) * 2.0  # NQ ~2 point per minute std
-
-        # Add regime changes: trend periods and range periods
-        regime = np.zeros(n)
-        i = 0
-        while i < n:
-            regime_length = np.random.randint(60, 200)
-            regime_type = np.random.choice([-1, 0, 1], p=[0.25, 0.35, 0.4])
-            regime[i:i + regime_length] = regime_type
-            i += regime_length
-
-        # Trend bias
-        returns += regime * 0.8
-
-        # Add volume spike effects (large moves with high volume)
-        spike_indices = np.random.choice(n, size=n // 50, replace=False)
-        returns[spike_indices] *= 3.0
-
-        prices = self._sim_base_price + np.cumsum(returns)
-
-        # Generate OHLCV
-        opens = prices
-        noise = np.abs(np.random.randn(n))
-        highs = prices + noise * 4.0
-        lows = prices - noise * 4.0
-        closes = prices + np.random.randn(n) * 1.5
-
-        # Ensure OHLC consistency
-        highs = np.maximum(highs, np.maximum(opens, closes))
-        lows = np.minimum(lows, np.minimum(opens, closes))
-
-        # Volume: higher during NY session (09:30-16:00), lower during London
-        base_volume = np.random.randint(200, 1500, n).astype(float)
-        for idx, ts in enumerate(trading_minutes):
-            hour = ts.hour
-            if 9 <= hour < 16:
-                base_volume[idx] *= 2.5  # NY session higher volume
-            if hour == 9 and ts.minute < 50:
-                base_volume[idx] *= 3.0  # Open volatility
-        # Volume spikes at regime changes
-        base_volume[spike_indices] *= 5.0
-
-        index = pd.DatetimeIndex(trading_minutes, tz="US/Eastern")
-        self._data_1m = pd.DataFrame({
-            "open": opens,
-            "high": highs,
-            "low": lows,
-            "close": closes,
-            "volume": base_volume.astype(int),
-        }, index=index)
-
-        # Generate 5m data by resampling
-        self._data_5m = self._data_1m.resample("5min").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna()
-
-        self._last_fetch = datetime.now()
-        self._use_simulation = True
-
-        logger.info(
-            "Data generated (SIMULATED): %d 1m bars, %d 5m bars, Price ~%.0f",
-            len(self._data_1m),
-            len(self._data_5m),
-            closes[-1],
-        )
-        return True
+    @property
+    def is_data_stale(self) -> bool:
+        """Check if data hasn't been refreshed in over 5 minutes."""
+        if self._last_fetch is None:
+            return True
+        return (datetime.now() - self._last_fetch).total_seconds() > 300
 
     @property
     def data_1m(self) -> pd.DataFrame:
