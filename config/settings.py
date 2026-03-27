@@ -2,14 +2,58 @@
 Trading bot configuration settings.
 """
 
+import os
+
+# ─── Data Provider ───────────────────────────────────────────────
+# Supported: "twelvedata", "polygon", "yahoo"
+# Set your API key as environment variable or paste here
+DATA_PROVIDER = os.environ.get("DATA_PROVIDER", "twelvedata")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY", "")
+
 # ─── Paper Trading ───────────────────────────────────────────────
 INITIAL_BALANCE = 200.0  # USD
-SYMBOL = "NQ=F"  # NASDAQ 100 E-mini Futures (Yahoo Finance ticker)
+SYMBOL = "NQ=F"  # Default symbol (auto-mapped per provider)
 CONTRACT_MULTIPLIER = 20.0  # NQ futures: $20 per point
 # For paper trading with $200, we use micro contracts (MNQ) sizing
 # MNQ multiplier is $2 per point; we simulate fractional exposure
 MICRO_MULTIPLIER = 2.0
 POSITION_SIZE = 1  # Number of micro contracts per trade
+
+# ─── Symbol Mapping ─────────────────────────────────────────────
+# Maps our internal symbol to provider-specific tickers
+SYMBOL_MAP = {
+    "NQ=F": {
+        "twelvedata": "NQ1!",      # NASDAQ 100 E-mini futures
+        "polygon": "NQ",           # Polygon futures
+        "yahoo": "NQ=F",           # Yahoo Finance
+        "name": "NASDAQ 100 E-mini Futures",
+    },
+    "ES=F": {
+        "twelvedata": "ES1!",      # S&P 500 E-mini futures
+        "polygon": "ES",
+        "yahoo": "ES=F",
+        "name": "S&P 500 E-mini Futures",
+    },
+    "QQQ": {
+        "twelvedata": "QQQ",       # NASDAQ 100 ETF
+        "polygon": "QQQ",
+        "yahoo": "QQQ",
+        "name": "Invesco QQQ Trust",
+    },
+    "SPY": {
+        "twelvedata": "SPY",       # S&P 500 ETF
+        "polygon": "SPY",
+        "yahoo": "SPY",
+        "name": "SPDR S&P 500 ETF",
+    },
+    "XAU/USD": {
+        "twelvedata": "XAU/USD",   # Gold
+        "polygon": "C:XAUUSD",
+        "yahoo": "GC=F",
+        "name": "Gold (XAU/USD)",
+    },
+}
 
 # ─── Timeframes ──────────────────────────────────────────────────
 TIMEFRAME_CONTEXT = "5m"  # For market phase detection

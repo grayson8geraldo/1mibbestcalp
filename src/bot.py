@@ -13,9 +13,12 @@ from datetime import datetime
 import pandas as pd
 
 from config.settings import (
+    DATA_PROVIDER,
     FETCH_INTERVAL_SECONDS,
     LOG_FILE,
     LOG_LEVEL,
+    SYMBOL,
+    SYMBOL_MAP,
     TICK_SIZE,
 )
 from src.data.feed import DataFeed
@@ -31,9 +34,10 @@ logger = logging.getLogger(__name__)
 class TradingBot:
     """Main trading bot orchestrating all components."""
 
-    def __init__(self):
+    def __init__(self, symbol: str = SYMBOL, provider: str = DATA_PROVIDER):
         # Components
-        self.data_feed = DataFeed()
+        self.symbol = symbol
+        self.data_feed = DataFeed(symbol=symbol, provider=provider)
         self.paper_trader = PaperTrader()
         self.session_mgr = SessionManager()
         self.volume_profile = VolumeProfile()
@@ -97,8 +101,11 @@ class TradingBot:
 
     def initialize(self) -> bool:
         """Initialize the bot: fetch data and compute initial profiles."""
+        sym_info = SYMBOL_MAP.get(self.symbol, {})
         logger.info("=" * 60)
-        logger.info("  NQ Futures Paper Trading Bot")
+        logger.info("  Paper Trading Bot")
+        logger.info("  Symbol: %s (%s)", self.symbol, sym_info.get("name", ""))
+        logger.info("  Provider: %s", self.data_feed.provider_name or self.data_feed._provider_name)
         logger.info("  Balance: $%.2f", self.paper_trader.balance)
         logger.info("=" * 60)
 
