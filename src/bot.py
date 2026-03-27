@@ -168,17 +168,25 @@ class TradingBot:
         if ref_vp.poc == 0:
             return
 
+        current_price = data_1m.iloc[-1]["close"] if not data_1m.empty else 0
+        logger.info(
+            "Evaluating | Price: %.2f | Ref VP: POC=%.2f VAH=%.2f VAL=%.2f | Session: %s",
+            current_price, ref_vp.poc, ref_vp.vah, ref_vp.val, session,
+        )
+
         # --- Model 1: Trend Following (NY session) ---
         if self.session_mgr.can_run_trend_model():
+            logger.info("Running Model 1 (Trend)...")
             trend_signal = self.trend_model.evaluate(
                 data_5m, data_1m, data_1m_flow, ref_vp, session="NY"
             )
             if trend_signal.active:
                 self._execute_signal(trend_signal, "TREND")
-                return  # Only one trade at a time
+                return
 
         # --- Model 2: Mean Reverting (London or range in NY) ---
         if self.session_mgr.can_run_range_model():
+            logger.info("Running Model 2 (Range)...")
             range_signal = self.range_model.evaluate(
                 data_5m, data_1m, data_1m_flow, ref_vp, session=session
             )

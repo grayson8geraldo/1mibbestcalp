@@ -95,13 +95,19 @@ class RangeModel:
             return False
 
         recent = data_5m.tail(10)
-        # Most bars should close within VA
         bars_in_va = (
             (recent["close"] >= vp.val - self.va_buffer)
             & (recent["close"] <= vp.vah + self.va_buffer)
         ).sum()
 
-        return bars_in_va >= 7  # 70%+ of bars within VA
+        is_range = bars_in_va >= 6  # 60%+ of bars within VA (relaxed from 7)
+
+        logger.info(
+            "[RANGE] Ranging check: %d/10 bars in VA (VAL=%.2f, VAH=%.2f, buf=%.2f) -> %s",
+            bars_in_va, vp.val, vp.vah, self.va_buffer,
+            "RANGING" if is_range else "NOT RANGING",
+        )
+        return is_range
 
     def update_breakout_tracking(
         self,
@@ -122,20 +128,19 @@ class RangeModel:
         # --- VAH (upside) breakout tracking ---
         if high > vp.vah + self.va_buffer:
             if self._breakout_state_high == BreakoutState.NONE:
-                # First drive detected
                 self._breakout_state_high = BreakoutState.FIRST_DRIVE
                 self._first_drive_high_count = 0
                 self._breakout_extreme_high = high
-                logger.debug("VAH first drive detected at %.2f", high)
+                logger.info("[RANGE] VAH first drive detected at %.2f (VAH=%.2f)", high, vp.vah)
 
             elif self._breakout_state_high == BreakoutState.FIRST_DRIVE:
                 self._first_drive_high_count += 1
                 self._breakout_extreme_high = max(self._breakout_extreme_high, high)
 
             elif self._breakout_state_high == BreakoutState.RETURNED:
-                # Second breakout attempt after return = potential false breakout
                 self._breakout_state_high = BreakoutState.FALSE_BREAKOUT
                 self._breakout_extreme_high = max(self._breakout_extreme_high, high)
+                logger.info("[RANGE] VAH FALSE BREAKOUT detected at %.2f", high)
 
         elif price < vp.vah:
             if self._breakout_state_high in (
@@ -144,7 +149,7 @@ class RangeModel:
             ):
                 if self._first_drive_high_count >= RANGE_FIRST_DRIVE_BARS:
                     self._breakout_state_high = BreakoutState.RETURNED
-                    logger.debug("VAH breakout returned inside VA")
+                    logger.info("[RANGE] VAH breakout returned inside VA (count=%d)", self._first_drive_high_count)
 
         # --- VAL (downside) breakout tracking ---
         if low < vp.val - self.va_buffer:
@@ -152,7 +157,7 @@ class RangeModel:
                 self._breakout_state_low = BreakoutState.FIRST_DRIVE
                 self._first_drive_low_count = 0
                 self._breakout_extreme_low = low
-                logger.debug("VAL first drive detected at %.2f", low)
+                logger.info("[RANGE] VAL first drive detected at %.2f (VAL=%.2f)", low, vp.val)
 
             elif self._breakout_state_low == BreakoutState.FIRST_DRIVE:
                 self._first_drive_low_count += 1
@@ -161,6 +166,7 @@ class RangeModel:
             elif self._breakout_state_low == BreakoutState.RETURNED:
                 self._breakout_state_low = BreakoutState.FALSE_BREAKOUT
                 self._breakout_extreme_low = min(self._breakout_extreme_low, low)
+                logger.info("[RANGE] VAL FALSE BREAKOUT detected at %.2f", low)
 
         elif price > vp.val:
             if self._breakout_state_low in (
@@ -169,7 +175,16 @@ class RangeModel:
             ):
                 if self._first_drive_low_count >= RANGE_FIRST_DRIVE_BARS:
                     self._breakout_state_low = BreakoutState.RETURNED
-                    logger.debug("VAL breakout returned inside VA")
+                    logger.info("[RANGE] VAL breakout returned inside VA (count=%d)", self._first_drive_low_count)
+
+        # Log current state
+        logger.info(
+            "[RANGE] State: high=%s (count=%d, extreme=%.2f), low=%s (count=%d, extreme=%.2f)",
+            self._breakout_state_high.value, self._first_drive_high_count,
+            self._breakout_extreme_high,
+            self._breakout_state_low.value, self._first_drive_low_count,
+            self._breakout_extreme_low,
+        )
 
     def evaluate(
         self,
@@ -196,13 +211,13 @@ class RangeModel:
         # --- Check for SHORT signal (false breakout above VAH) ---
         if self._breakout_state_high == BreakoutState.RETURNED:
             if current_price < vp.vah:
-                # Price returned below VAH - look for sell confirmation
+                logger.info("[RANGE] Checking SHORT entry: price=%.2f < VAH=%.2f", current_price, vp.vah)
+
                 triggered, entry_price, _ = self.of.detect_reversal_entry(
                     data_1m_flow, direction="SHORT", session=session
                 )
 
                 if triggered and entry_price is not None:
-                    # Scan for no follow-through
                     zone_signal = self.of.scan_zone(
                         data_1m_flow,
                         vp.vah - self.va_buffer,
@@ -212,9 +227,8 @@ class RangeModel:
 
                     if zone_signal.has_no_follow_through or zone_signal.net_aggression == "BEARISH":
                         stop_loss = self._breakout_extreme_high + self.stop_offset
-                        take_profit = vp.poc  # Target POC
+                        take_profit = vp.poc
 
-                        # CVD check
                         cvd_result = self.cvd.calculate(data_1m_flow)
                         cvd_confirms = cvd_result.cvd_trend in ("FALLING", "FLAT")
                         confidence = 0.7 if cvd_confirms else 0.5
@@ -231,16 +245,21 @@ class RangeModel:
 
                         self._breakout_state_high = BreakoutState.NONE
                         logger.info(
-                            "RANGE SIGNAL: SHORT @ %.2f | SL: %.2f | TP: %.2f",
-                            entry_price,
-                            stop_loss,
-                            take_profit,
+                            ">>> RANGE SIGNAL: SHORT @ %.2f | SL: %.2f | TP: %.2f",
+                            entry_price, stop_loss, take_profit,
                         )
                         return signal
+                    else:
+                        logger.info("[RANGE] SHORT: no follow-through=%s, aggression=%s — skipping",
+                                    zone_signal.has_no_follow_through, zone_signal.net_aggression)
+                else:
+                    logger.info("[RANGE] SHORT: no reversal entry trigger detected")
 
         # --- Check for LONG signal (false breakout below VAL) ---
         if self._breakout_state_low == BreakoutState.RETURNED:
             if current_price > vp.val:
+                logger.info("[RANGE] Checking LONG entry: price=%.2f > VAL=%.2f", current_price, vp.val)
+
                 triggered, entry_price, _ = self.of.detect_reversal_entry(
                     data_1m_flow, direction="LONG", session=session
                 )
@@ -273,11 +292,14 @@ class RangeModel:
 
                         self._breakout_state_low = BreakoutState.NONE
                         logger.info(
-                            "RANGE SIGNAL: LONG @ %.2f | SL: %.2f | TP: %.2f",
-                            entry_price,
-                            stop_loss,
-                            take_profit,
+                            ">>> RANGE SIGNAL: LONG @ %.2f | SL: %.2f | TP: %.2f",
+                            entry_price, stop_loss, take_profit,
                         )
                         return signal
+                    else:
+                        logger.info("[RANGE] LONG: no follow-through=%s, aggression=%s — skipping",
+                                    zone_signal.has_no_follow_through, zone_signal.net_aggression)
+                else:
+                    logger.info("[RANGE] LONG: no reversal entry trigger detected")
 
         return signal

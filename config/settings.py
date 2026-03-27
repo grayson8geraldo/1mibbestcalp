@@ -43,14 +43,14 @@ VP_NUM_BINS = 50  # Number of price bins for volume profile
 
 # ─── Strategy Parameters ────────────────────────────────────────
 # Model 1: Trend Following
-TREND_LVN_PROXIMITY_TICKS = 5  # How close price must be to LVN (in ticks)
-TREND_BREAKEVEN_TICKS = 10  # Move to breakeven after N ticks profit
+TREND_LVN_PROXIMITY_TICKS = 40  # How close price must be to LVN (in ticks) = 10 NQ points
+TREND_BREAKEVEN_TICKS = 20  # Move to breakeven after N ticks profit = 5 NQ points
 TICK_SIZE = 0.25  # NQ tick size
 
 # Model 2: Mean Reverting
-RANGE_VA_BUFFER_TICKS = 2  # Buffer around VA boundaries
-RANGE_STOP_OFFSET_TICKS = 2  # Extra ticks beyond false breakout for stop
-RANGE_FIRST_DRIVE_BARS = 5  # Ignore first N bars of breakout
+RANGE_VA_BUFFER_TICKS = 20  # Buffer around VA boundaries = 5 NQ points
+RANGE_STOP_OFFSET_TICKS = 8  # Extra ticks beyond false breakout for stop = 2 NQ points
+RANGE_FIRST_DRIVE_BARS = 3  # Ignore first N bars of breakout
 
 # ─── Risk Management ────────────────────────────────────────────
 MAX_DAILY_LOSS = 50.0  # Maximum daily loss in USD

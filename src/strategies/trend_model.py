@@ -72,22 +72,33 @@ class TrendModel:
             return False, ""
 
         current_price = data_5m.iloc[-1]["close"]
+        recent = data_5m.tail(5)
 
         # Price clearly above previous VAH = bullish breakout
-        if current_price > prev_vp.vah + self.lvn_proximity:
-            # Confirm with momentum: multiple bars above VAH
-            recent = data_5m.tail(5)
+        if current_price > prev_vp.vah:
             bars_above = (recent["close"] > prev_vp.vah).sum()
+            logger.info(
+                "[TREND] Breakout check UP: price=%.2f > VAH=%.2f, bars_above=%d/5 (need 3)",
+                current_price, prev_vp.vah, bars_above,
+            )
             if bars_above >= 3:
                 return True, "LONG"
 
         # Price clearly below previous VAL = bearish breakout
-        if current_price < prev_vp.val - self.lvn_proximity:
-            recent = data_5m.tail(5)
+        if current_price < prev_vp.val:
             bars_below = (recent["close"] < prev_vp.val).sum()
+            logger.info(
+                "[TREND] Breakout check DOWN: price=%.2f < VAL=%.2f, bars_below=%d/5 (need 3)",
+                current_price, prev_vp.val, bars_below,
+            )
             if bars_below >= 3:
                 return True, "SHORT"
 
+        # Log why no breakout
+        logger.info(
+            "[TREND] No breakout: price=%.2f, VAH=%.2f, VAL=%.2f (price inside VA or insufficient bars)",
+            current_price, prev_vp.vah, prev_vp.val,
+        )
         return False, ""
 
     def find_impulse_lvn(
@@ -102,22 +113,27 @@ class TrendModel:
         if len(data_1m) < 10:
             return []
 
-        # Identify impulse: look for directional move in last 20 bars
-        recent = data_1m.tail(30)
+        # Identify impulse: look for directional move in last 30-60 bars
+        recent = data_1m.tail(60)
 
         if direction == "LONG":
-            # Find swing low to current high
             low_idx = recent["low"].idxmin()
             impulse = recent.loc[low_idx:]
         else:
             high_idx = recent["high"].idxmax()
             impulse = recent.loc[high_idx:]
 
-        if len(impulse) < 5:
+        if len(impulse) < 3:
+            logger.info("[TREND] Impulse too short: %d bars", len(impulse))
             return []
 
         # Calculate local volume profile on impulse
         local_vp = self.vp.calculate(impulse)
+        logger.info(
+            "[TREND] Impulse LVN: %d levels found in %d-bar impulse (range %.2f-%.2f)",
+            len(local_vp.lvn_levels), len(impulse),
+            impulse["low"].min(), impulse["high"].max(),
+        )
         return local_vp.lvn_levels
 
     def check_pullback_to_lvn(
@@ -130,15 +146,28 @@ class TrendModel:
         Step 3: Check if price has pulled back to any LVN level.
         Returns the LVN level if price is near it, None otherwise.
         """
+        closest_lvn = None
+        closest_dist = float("inf")
+
         for lvn in lvn_levels:
             distance = abs(current_price - lvn)
+            if distance < closest_dist:
+                closest_dist = distance
+                closest_lvn = lvn
+
             if distance <= self.lvn_proximity:
-                # For LONG, price should pull back DOWN to LVN
-                if direction == "LONG" and current_price <= lvn + self.lvn_proximity:
-                    return lvn
-                # For SHORT, price should pull back UP to LVN
-                if direction == "SHORT" and current_price >= lvn - self.lvn_proximity:
-                    return lvn
+                logger.info(
+                    "[TREND] Price at LVN! price=%.2f, LVN=%.2f, dist=%.2f (max=%.2f)",
+                    current_price, lvn, distance, self.lvn_proximity,
+                )
+                return lvn
+
+        if closest_lvn is not None:
+            logger.info(
+                "[TREND] Closest LVN=%.2f, dist=%.2f, proximity=%.2f — %s",
+                closest_lvn, closest_dist, self.lvn_proximity,
+                "TOO FAR" if closest_dist > self.lvn_proximity else "OK",
+            )
         return None
 
     def evaluate(
@@ -160,22 +189,19 @@ class TrendModel:
         if not is_breakout:
             return signal
 
-        logger.debug("Trend breakout detected: %s", direction)
+        logger.info("[TREND] === BREAKOUT DETECTED: %s ===", direction)
 
         # Step 2: Find LVN levels in impulse
         lvn_levels = self.find_impulse_lvn(data_1m, direction)
         if not lvn_levels:
+            logger.info("[TREND] No LVN levels found, skipping")
             return signal
-
-        logger.debug("LVN levels found: %s", [f"{l:.2f}" for l in lvn_levels])
 
         # Step 3: Check pullback to LVN
         current_price = data_1m.iloc[-1]["close"]
         active_lvn = self.check_pullback_to_lvn(current_price, lvn_levels, direction)
         if active_lvn is None:
             return signal
-
-        logger.debug("Price at LVN zone: %.2f (LVN: %.2f)", current_price, active_lvn)
 
         # Step 4: Check order flow for aggressive entry
         side_str = "LONG" if direction == "LONG" else "SHORT"
@@ -184,6 +210,10 @@ class TrendModel:
         )
 
         if not triggered or entry_price is None or stop_price is None:
+            logger.info(
+                "[TREND] At LVN but no order flow trigger (need aggressive %s candle)",
+                direction,
+            )
             return signal
 
         # CVD confirmation
@@ -196,19 +226,18 @@ class TrendModel:
         confidence = 0.7 if cvd_confirms else 0.5
 
         # Step 5: Calculate targets
-        # Take profit: previous day extremes or POC
         if direction == "LONG":
             take_profit = max(
                 data_5m["high"].max(),
                 prev_vp.poc if prev_vp.poc > entry_price else data_5m["high"].max(),
             )
-            stop_loss = stop_price - TICK_SIZE  # 1 tick below cluster
+            stop_loss = stop_price - TICK_SIZE
         else:
             take_profit = min(
                 data_5m["low"].min(),
                 prev_vp.poc if prev_vp.poc < entry_price else data_5m["low"].min(),
             )
-            stop_loss = stop_price + TICK_SIZE  # 1 tick above cluster
+            stop_loss = stop_price + TICK_SIZE
 
         signal = TrendSignal(
             active=True,
